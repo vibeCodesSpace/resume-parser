@@ -3,7 +3,7 @@ import { exec } from 'child_process';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 // Initialize Gemini
-const genAI = new GoogleGenerativeAI("AIzaSyBDmOXbHyyRNMsG4INO-9qDk5O7RyIaP4A");
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 async function extractResumeData(resumeText) {
   const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
