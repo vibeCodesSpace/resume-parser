@@ -1,14 +1,48 @@
 import fs from 'fs';
 import { exec } from 'child_process';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import OpenAI from 'openai';
 
-// Initialize Gemini
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// Define API providers and their initialization logic
+const apiProviders = [
+  {
+    name: "gemini",
+    apiKey: process.env.GEMINI_API_KEY,
+    initClient: (key) => new GoogleGenerativeAI(key),
+    extractData: async (client, prompt) => {
+      const model = client.getGenerativeModel({ model: "gemini-1.5-flash" });
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      const text = response.text();
+      const jsonMatch = text.match(/```json
+([\s\S]*?)
+```/);
+      return JSON.parse(jsonMatch ? jsonMatch[1] : text);
+    },
+    isQuotaError: (error) => error.status === 400 || error.status === 429, // Generic bad request or quota
+  },
+  {
+    name: "openai",
+    apiKey: process.env.OPENAI_API_KEY,
+    initClient: (key) => new OpenAI({ apiKey: key }),
+    extractData: async (client, prompt) => {
+      const completion = await client.chat.completions.create({
+        model: "gpt-4o",
+        messages: [
+          { role: "system", content: prompt },
+          { role: "user", content: "" }, // User content is part of the prompt now
+        ],
+        temperature: 0.3,
+        response_format: { type: "json_object" },
+      });
+      return JSON.parse(completion.choices[0].message.content || "{}");
+    },
+    isQuotaError: (error) => error.status === 429 || error.code === 'insufficient_quota',
+  },
+];
 
 async function extractResumeData(resumeText) {
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
-  const prompt = `You are a highly accurate data extraction AI. Your sole purpose is to extract structured data from the provided resume text. Analyze the content to infer the candidate's industry, primary role, and personality based on the language used. You MUST return ONLY a JSON object with the exact structure below. Do NOT include any conversational text, markdown outside the JSON, or any other characters.
+  const basePrompt = `You are a highly accurate data extraction AI. Your sole purpose is to extract structured data from the provided resume text. Analyze the content to infer the candidate's industry, primary role, and personality based on the language used. You MUST return ONLY a JSON object with the exact structure below. Do NOT include any conversational text, markdown outside the JSON, or any other characters.
 
 {
   "name": "Full Name",
@@ -26,22 +60,27 @@ async function extractResumeData(resumeText) {
 Resume Text:
 ${resumeText}`;
 
-  const result = await model.generateContent(prompt);
-  const response = await result.response;
-  const text = response.text();
-
-  try {
-    // Attempt to parse directly, or extract from markdown if present
-    let jsonStr = text;
-    const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/);
-    if (jsonMatch) {
-      jsonStr = jsonMatch[1];
+  for (const providerConfig of apiProviders) {
+    if (!providerConfig.apiKey) {
+      console.warn(`Skipping ${providerConfig.name} provider: API key not set.`);
+      continue;
     }
-    return JSON.parse(jsonStr);
-  } catch (e) {
-    console.error("Failed to parse JSON from Gemini API response:", text);
-    throw new Error("Invalid JSON response from AI.");
+
+    try {
+      console.log(`Attempting to extract data using ${providerConfig.name} provider...`);
+      const client = providerConfig.initClient(providerConfig.apiKey);
+      const result = await providerConfig.extractData(client, basePrompt);
+      return result;
+    } catch (error) {
+      if (providerConfig.isQuotaError(error)) {
+        console.warn(`Quota or invalid key error with ${providerConfig.name}: ${error.message}. Trying next provider...`);
+      } else {
+        console.error(`Error with ${providerConfig.name}: ${error.message}`);
+        throw error; // Re-throw if it's not a quota/invalid key error
+      }
+    }
   }
+  throw new Error("All configured AI providers failed to extract resume data.");
 }
 
 async function generatePortfolioHtml(resumeData) {
